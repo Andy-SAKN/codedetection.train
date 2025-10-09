@@ -6,8 +6,8 @@ import cv2
 import numpy as np
 import onnx
 import onnxruntime
-from pyzbar import pyzbar
-from pylibdmtx import pylibdmtx  # add this import
+
+
 
 
 def softmax(z):
@@ -156,24 +156,24 @@ def resize_img(img, mode):
 
 
 def draw(img, bboxes, kpss, out_path, with_kps=True):
-    # 检查是否有条形码类别
-    has_barcode = np.any(bboxes[:, 5] == 1) if bboxes.shape[0] > 0 else False
-    if has_barcode:
-        # 直接用整图解码并绘制
-        def decode_barcode(image):
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            barcodes = pyzbar.decode(gray)
-            for barcode in barcodes:
-                (x, y, w, h) = barcode.rect
-                cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                barcode_data = barcode.data.decode("utf-8")
-                barcode_type = barcode.type
-                text = "{} ({})".format(barcode_data, barcode_type)
-                cv2.putText(image, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                print("[INFO] Found barcode: {}, {}".format(barcode_data, barcode_type))
-            cv2.imshow("Barcode Reader", image)
-            cv2.waitKey(0)
-        decode_barcode(img)
+    # # 检查是否有条形码类别
+    # has_barcode = np.any(bboxes[:, 5] == 1) if bboxes.shape[0] > 0 else False
+    # if has_barcode:
+    #     # 直接用整图解码并绘制
+    #     def decode_barcode(image):
+    #         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    #         barcodes = pyzbar.decode(gray)
+    #         for barcode in barcodes:
+    #             (x, y, w, h) = barcode.rect
+    #             cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    #             barcode_data = barcode.data.decode("utf-8")
+    #             barcode_type = barcode.type
+    #             text = "{} ({})".format(barcode_data, barcode_type)
+    #             cv2.putText(image, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    #             print("[INFO] Found barcode: {}, {}".format(barcode_data, barcode_type))
+    #         cv2.imshow("Barcode Reader", image)
+    #         cv2.waitKey(0)
+    #     decode_barcode(img)
     # 其它类别正常绘制和解码
     for i in range(bboxes.shape[0]):
         bbox = bboxes[i]
@@ -512,4 +512,3 @@ if __name__ == '__main__':
     
     end_time = time() - start
     print(f'Total processing time: {end_time:.2f}s')
-
