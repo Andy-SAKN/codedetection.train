@@ -180,6 +180,7 @@ def draw(img, bboxes, kpss, out_path, with_kps=True):
         x1, y1, x2, y2 = bbox[:4].astype(np.int32)
         score = bbox[4]
         cls_id = int(bbox[5])
+        print("类别ID:", cls_id)
         if cls_id != 1:
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
             label = f'cls:{cls_id} conf:{score:.2f}'
