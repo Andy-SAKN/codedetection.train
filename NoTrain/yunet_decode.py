@@ -180,16 +180,27 @@ def draw(img, bboxes, kpss, out_path, with_kps=True):
         x1, y1, x2, y2 = bbox[:4].astype(np.int32)
         score = bbox[4]
         cls_id = int(bbox[5])
-        print("类别ID:", cls_id)
+        # === 边框扩大10% ===
+        w = x2 - x1
+        h = y2 - y1
+        cx = x1 + w // 2
+        cy = y1 + h // 2
+        new_w = int(w * 1.1)
+        new_h = int(h * 1.1)
+        new_x1 = max(0, cx - new_w // 2)
+        new_y1 = max(0, cy - new_h // 2)
+        new_x2 = min(img.shape[1], cx + new_w // 2)
+        new_y2 = min(img.shape[0], cy + new_h // 2)
+        # ===================
         if cls_id != 1:
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.rectangle(img, (new_x1, new_y1), (new_x2, new_y2), (0, 0, 255), 2)
             label = f'cls:{cls_id} conf:{score:.2f}'
             cv2.putText(
-                img, label, (x1, y1 - 5),
+                img, label, (new_x1, new_y1 - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
             # 二维码解码逻辑：如果cls_id==3，尝试解码并输出
             if cls_id == 3:
-                qr_roi = img[max(y1,0):max(y2,0), max(x1,0):max(x2,0)]
+                qr_roi = img[max(new_y1,0):max(new_y2,0), max(new_x1,0):max(new_x2,0)]
                 if qr_roi.size > 0:
                     qr_decoder = cv2.QRCodeDetector()
                     data, points, _ = qr_decoder.detectAndDecode(qr_roi)
@@ -199,7 +210,7 @@ def draw(img, bboxes, kpss, out_path, with_kps=True):
                         print("[QR] 检测到cls=3但未能解码二维码")
             # DataMatrix解码逻辑：如果cls_id==5，尝试解码并输出
             if cls_id == 5:
-                dm_roi = img[max(y1,0):max(y2,0), max(x1,0):max(x2,0)]
+                dm_roi = img[max(new_y1,0):max(new_y2,0), max(new_x1,0):max(new_x2,0)]
                 if dm_roi.size > 0:
                     gray_dm = cv2.cvtColor(dm_roi, cv2.COLOR_BGR2GRAY)
                     results = pylibdmtx.decode(gray_dm)
