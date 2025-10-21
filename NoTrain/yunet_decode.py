@@ -156,25 +156,6 @@ def resize_img(img, mode):
 
 
 def draw(img, bboxes, kpss, out_path, with_kps=True):
-    # # 检查是否有条形码类别
-    # has_barcode = np.any(bboxes[:, 5] == 1) if bboxes.shape[0] > 0 else False
-    # if has_barcode:
-    #     # 直接用整图解码并绘制
-    #     def decode_barcode(image):
-    #         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    #         barcodes = pyzbar.decode(gray)
-    #         for barcode in barcodes:
-    #             (x, y, w, h) = barcode.rect
-    #             cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-    #             barcode_data = barcode.data.decode("utf-8")
-    #             barcode_type = barcode.type
-    #             text = "{} ({})".format(barcode_data, barcode_type)
-    #             cv2.putText(image, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    #             print("[INFO] Found barcode: {}, {}".format(barcode_data, barcode_type))
-    #         cv2.imshow("Barcode Reader", image)
-    #         cv2.waitKey(0)
-    #     decode_barcode(img)
-    # 其它类别正常绘制和解码
     for i in range(bboxes.shape[0]):
         bbox = bboxes[i]
         x1, y1, x2, y2 = bbox[:4].astype(np.int32)
@@ -192,37 +173,21 @@ def draw(img, bboxes, kpss, out_path, with_kps=True):
         new_x2 = min(img.shape[1], cx + new_w // 2)
         new_y2 = min(img.shape[0], cy + new_h // 2)
         # ===================
-        if cls_id != 1:
-            cv2.rectangle(img, (new_x1, new_y1), (new_x2, new_y2), (0, 0, 255), 2)
-            label = f'cls:{cls_id} conf:{score:.2f}'
-            cv2.putText(
-                img, label, (new_x1, new_y1 - 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-            # 二维码解码逻辑：如果cls_id==3，尝试解码并输出
-            if cls_id == 3:
-                qr_roi = img[max(new_y1,0):max(new_y2,0), max(new_x1,0):max(new_x2,0)]
-                if qr_roi.size > 0:
-                    qr_decoder = cv2.QRCodeDetector()
-                    data, points, _ = qr_decoder.detectAndDecode(qr_roi)
-                    if data:
-                        print(f"[QR] 检测到二维码内容: {data}")
-                    else:
-                        print("[QR] 检测到cls=3但未能解码二维码")
-            # DataMatrix解码逻辑：如果cls_id==5，尝试解码并输出
-            if cls_id == 5:
-                dm_roi = img[max(new_y1,0):max(new_y2,0), max(new_x1,0):max(new_x2,0)]
-                if dm_roi.size > 0:
-                    gray_dm = cv2.cvtColor(dm_roi, cv2.COLOR_BGR2GRAY)
-                    results = pylibdmtx.decode(gray_dm)
-                    if results:
-                        for r in results:
-                            try:
-                                dm_data = r.data.decode("utf-8")
-                            except Exception:
-                                dm_data = str(r.data)
-                            print(f"[DataMatrix] 检测到内容: {dm_data}")
-                    else:
-                        print("[DataMatrix] 检测到cls=5但未能解码DataMatrix")
+        cv2.rectangle(img, (new_x1, new_y1), (new_x2, new_y2), (0, 0, 255), 2)
+        label = f'cls:{cls_id} conf:{score:.2f}'
+        cv2.putText(
+            img, label, (new_x1, new_y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        # 仅二维码解码逻辑：如果cls_id==3，尝试解码并输出
+        if cls_id == 3:
+            qr_roi = img[max(new_y1,0):max(new_y2,0), max(new_x1,0):max(new_x2,0)]
+            if qr_roi.size > 0:
+                qr_decoder = cv2.QRCodeDetector()
+                data, points, _ = qr_decoder.detectAndDecode(qr_roi)
+                if data:
+                    print(f"[QR] 检测到二维码内容: {data}")
+                else:
+                    print("[QR] 检测到cls=3但未能解码二维码")
     print('Detection result saved to:', out_path)
     cv2.imwrite(out_path, img)
 
