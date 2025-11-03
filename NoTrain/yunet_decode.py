@@ -7,6 +7,16 @@ import numpy as np
 import onnx
 import onnxruntime
 
+# 新增：引入 SR 脚本的接口并尝试加载 SR 引擎（失败时降级）
+from sr import load_sr_engine, run_sr_on_gray, decode_qr
+
+try:
+    sr_net = load_sr_engine(".", "qbar_sr.yaml")
+    print("[SR] SR 引擎加载成功")
+except Exception as e:
+    sr_net = None
+    print(f"[SR] 无法加载 SR 引擎: {e}，将仅使用直接灰度解码。")
+
 
 
 
@@ -156,6 +166,11 @@ def resize_img(img, mode):
 
 
 def draw(img, bboxes, kpss, out_path, with_kps=True):
+    # 保留原始未标注的图像用于解码
+    orig_img = img.copy()
+    # 在可视化拷贝上绘制用于保存
+    vis = img.copy()
+
     for i in range(bboxes.shape[0]):
         bbox = bboxes[i]
         x1, y1, x2, y2 = bbox[:4].astype(np.int32)
@@ -166,30 +181,57 @@ def draw(img, bboxes, kpss, out_path, with_kps=True):
         h = y2 - y1
         cx = x1 + w // 2
         cy = y1 + h // 2
-        new_w = int(w * 1.1)
-        new_h = int(h * 1.1)
+        new_w = int(w * 1.2) 
+        new_h = int(h * 1.2)
         new_x1 = max(0, cx - new_w // 2)
         new_y1 = max(0, cy - new_h // 2)
-        new_x2 = min(img.shape[1], cx + new_w // 2)
-        new_y2 = min(img.shape[0], cy + new_h // 2)
-        # ===================
-        cv2.rectangle(img, (new_x1, new_y1), (new_x2, new_y2), (0, 0, 255), 2)
+        new_x2 = min(vis.shape[1], cx + new_w // 2)
+        new_y2 = min(vis.shape[0], cy + new_h // 2)
+        # 在可视化图上绘制
+        cv2.rectangle(vis, (new_x1, new_y1), (new_x2, new_y2), (0, 0, 255), 2)
         label = f'cls:{cls_id} conf:{score:.2f}'
         cv2.putText(
-            img, label, (new_x1, new_y1 - 5),
+            vis, label, (new_x1, new_y1 - 5),
             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        # 仅二维码解码逻辑：如果cls_id==3，尝试解码并输出
+        # 解码时使用原始图像（orig_img），不使用已绘制的 vis
         if cls_id == 3:
-            qr_roi = img[max(new_y1,0):max(new_y2,0), max(new_x1,0):max(new_x2,0)]
+            qr_roi = orig_img[max(new_y1,0):max(new_y2,0), max(new_x1,0):max(new_x2,0)]
             if qr_roi.size > 0:
-                qr_decoder = cv2.QRCodeDetector()
-                data, points, _ = qr_decoder.detectAndDecode(qr_roi)
-                if data:
-                    print(f"[QR] 检测到二维码内容: {data}")
+                # 直接在内存中处理裁剪区域，保持原始像素
+                if qr_roi.ndim == 3:
+                    gray_roi = cv2.cvtColor(qr_roi, cv2.COLOR_BGR2GRAY)
                 else:
-                    print("[QR] 检测到cls=3但未能解码二维码")
+                    gray_roi = qr_roi.copy()
+                # 先尝试直接解码（与 sr.decode_qr 行为一致）
+                try:
+                    res_direct = decode_qr(gray_roi)
+                except Exception:
+                    det = cv2.QRCodeDetector()
+                    txt, pts, _ = det.detectAndDecode(gray_roi)
+                    res_direct = [(txt.strip(), pts)] if txt else []
+                if res_direct:
+                    for txt, _ in res_direct:
+                        print(f"[QR] 直接灰度解码到二维码内容: {txt}")
+                else:
+                    # 直接解码失败，若 SR 引擎可用则对内存灰度图做 SR 再解码
+                    if sr_net is not None:
+                        try:
+                            sr_gray = run_sr_on_gray(sr_net, gray_roi)
+                            res_sr = decode_qr(sr_gray)
+                            if res_sr:
+                                for txt, _ in res_sr:
+                                    print(f"[QR] SR 后解码到二维码内容: {txt}")
+                            else:
+                                print("[QR] 直接灰度和 SR 后均未能解码二维码")
+                        except Exception as e:
+                            print(f"[QR] SR 处理或解码时出错: {e}")
+                    else:
+                        print("[QR] 直接灰度解码失败，且未加载 SR 引擎，无法继续 SR 解码")
+
+    # 若需要对整张原始图解码（例如之前的整图逻辑），请使用 orig_img
+    # 保存可视化结果
     print('Detection result saved to:', out_path)
-    cv2.imwrite(out_path, img)
+    cv2.imwrite(out_path, vis)
 
 
 
