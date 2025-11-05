@@ -7,9 +7,13 @@ import cv2
 import numpy as np
 from yunet_decode import YUNET  # 直接导入你已有的检测实现
 
+# 不在模块导入时加载 SR；仅在 main 且用户启用 --use_sr 时动态导入/加载
+load_sr_engine = None
+run_sr_on_gray = None
+
 
 def list_images(folder):
-    exts = ('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff')
+    exts = ('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff', '.gif')
     return sorted([os.path.join(folder, f) for f in os.listdir(folder)
                    if f.lower().endswith(exts)])
 
@@ -28,17 +32,20 @@ def decode_qr_with_yunet(img,
                          score_thresh=0.02,
                          save_dir=None,
                          basename=None,
-                         allow_save_once=False):
+                         allow_save_once=False,
+                         sr_net=None):
     """
     先用 YUNET 检测，再在 ROI 上解码。
-    - allow_save_once=True 时：如果 save_dir 与 basename 提供，则把第一个匹配 QR 类别的 ROI 保存一次。
-    - 计时场景请将 allow_save_once=False（默认），以免保存影响计时。
+    返回 (success: bool, used_sr: bool, sr_attempted: bool)
+    - sr_attempted: 表示是否在本次处理中曾尝试调用 SR（即解码失败后实际调用过 SR 推理）
     """
     bboxes, _ = yunet.detect(img, score_thresh=score_thresh, mode=mode)
     if len(bboxes) == 0:
-        return False
+        return False, False, False
 
     saved = False
+    sr_any_attempted = False
+
     for i, bbox in enumerate(bboxes):
         x1, y1, x2, y2, score, cls_id = bbox
         if int(cls_id) != qr_class_id:
@@ -60,12 +67,26 @@ def decode_qr_with_yunet(img,
                 pass  # 保存失败不影响流程
             saved = True
 
-        # 尝试在 ROI 内解码
+        # 尝试在 ROI 内解码（直接用 OpenCV）
         data, points, _ = detector.detectAndDecode(roi)
         if data:
-            return True
+            return True, False, sr_any_attempted
 
-    return False
+        # ROI 解码失败 -> 若提供 SR 模型则对 ROI 做超分再尝试一次
+        if sr_net is not None and run_sr_on_gray is not None:
+            sr_any_attempted = True
+            try:
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                sr_gray = run_sr_on_gray(sr_net, gray_roi)
+                # sr_gray 为 uint8 灰度图，直接用 detector 解码
+                data2, points2, _ = detector.detectAndDecode(sr_gray)
+                if data2:
+                    return True, True, True
+            except Exception:
+                # SR 失败不影响流程，继续下一个 bbox
+                pass
+
+    return False, False, sr_any_attempted
 
 
 def benchmark(image_dir,
@@ -74,7 +95,8 @@ def benchmark(image_dir,
               warmup=5,
               mode='640,640',
               score_thresh=0.02,
-              qr_class_id=3):
+              qr_class_id=3,
+              sr_net=None):
     # 固定 OpenCV 线程数降低随机波动（需要可去掉）
     try:
         cv2.setNumThreads(1)
@@ -93,6 +115,13 @@ def benchmark(image_dir,
         print("No images found in folder:", image_dir)
         return
 
+    # 新增：after_images 与 images 并列，放在 image_dir 的父目录下
+    after_dir = os.path.join(os.path.dirname(os.path.abspath(image_dir)), "after_images")
+    try:
+        os.makedirs(after_dir, exist_ok=True)
+    except Exception:
+        pass
+
     print(f"Found {len(img_list)} images.")
     warm_img = cv2.imread(img_list[0])
     if warm_img is None:
@@ -102,11 +131,18 @@ def benchmark(image_dir,
     # --- 预热：两条管线各跑几次，剔除首次冷启动的影响 ---
     for _ in range(warmup):
         decode_qr_fullimg(warm_img, qr_detector)
-        decode_qr_with_yunet(warm_img, yunet, qr_detector, qr_class_id, mode, score_thresh)
+        # 在预热时把 sr_net 也传入，以保证热身覆盖 SR 路径（若启用）
+        decode_qr_with_yunet(warm_img, yunet, qr_detector, qr_class_id, mode, score_thresh, sr_net=sr_net)
 
     # --- 正式计时 ---
     total_full, total_yunet = 0.0, 0.0
     n_valid = 0
+
+    # 新增统计：成功计数
+    full_success = 0
+    yunet_success = 0
+    yunet_success_with_sr = 0
+    yunet_sr_attempts = 0  # 新增：统计 SR 实际尝试次数
 
     for idx, img_path in enumerate(img_list, 1):
         img = cv2.imread(img_path)
@@ -115,7 +151,6 @@ def benchmark(image_dir,
             continue
 
         basename = os.path.basename(img_path)
-        save_dir = os.path.dirname(img_path)
 
         # A: OpenCV 整图（计时）
         t0 = perf_counter()
@@ -127,22 +162,38 @@ def benchmark(image_dir,
         # B: YUNET 粗检测 → ROI 解码（计时）
         t0 = perf_counter()
         for _ in range(repeats):
-            decode_qr_with_yunet(img, yunet, qr_detector, qr_class_id, mode, score_thresh)
+            # 在计时中也传入 sr_net：若需要则包含 SR 时间（但不进行保存/打印）
+            decode_qr_with_yunet(img, yunet, qr_detector, qr_class_id, mode, score_thresh, sr_net=sr_net)
         t1 = perf_counter()
         avg_yunet = (t1 - t0) / repeats
 
-        # ✅ 在计时之外保存一次 ROI（若有），不影响计时
-        decode_qr_with_yunet(img, yunet, qr_detector, qr_class_id, mode, score_thresh,
-                             save_dir=save_dir, basename=basename, allow_save_once=True)
+        # ✅ 在计时之外保存一次 ROI（若有），并统计成功率
+        full_ok = decode_qr_fullimg(img, qr_detector)
+        yunet_ok, yunet_used_sr, sr_attempted = decode_qr_with_yunet(
+            img, yunet, qr_detector, qr_class_id, mode, score_thresh,
+            save_dir=after_dir, basename=basename, allow_save_once=True, sr_net=sr_net
+        )
+
+        # 统计
+        if full_ok:
+            full_success += 1
+        if yunet_ok:
+            yunet_success += 1
+            if yunet_used_sr:
+                yunet_success_with_sr += 1
+        if sr_attempted:  # 仅在尝试过 SR 时计数
+            yunet_sr_attempts += 1
 
         total_full += avg_full
         total_yunet += avg_yunet
         n_valid += 1
 
+        # 打印摘要（此打印发生在计时之外）
         print(f"[{idx:03d}] {basename} | "
               f"OpenCV: {avg_full*1000:.3f} ms | "
               f"YUNET→OpenCV: {avg_yunet*1000:.3f} ms | "
-              f"Speedup: {avg_full/avg_yunet:.2f}x")
+              f"Speedup: {avg_full/avg_yunet:.2f}x | "
+              f"OpenCV_OK: {str(full_ok)} | YUNET_OK: {str(yunet_ok)}{'(SR)' if yunet_used_sr else ''}")
 
     # --- 汇总 ---
     if n_valid == 0:
@@ -150,11 +201,19 @@ def benchmark(image_dir,
         return
 
     print("\n==== Summary ====")
-    print(f"Images: {n_valid}, Repeats per image: {repeats}, Warmup: {warmup}")
+    print(f"Images processed: {n_valid}, Repeats per image: {repeats}, Warmup: {warmup}")
     print(f"OpenCV avg:        {total_full/n_valid*1000:.3f} ms")
     print(f"YUNET→OpenCV avg:  {total_yunet/n_valid*1000:.3f} ms")
     print(f"Overall speedup:   {total_full/total_yunet:.2f}x")
-
+    # 成功率
+    print("\n==== Success Rate ====")
+    print(f"OpenCV (full image): {full_success}/{n_valid} ({full_success/n_valid*100:.2f}%)")
+    print(f"YUNET pipeline:      {yunet_success}/{n_valid} ({yunet_success/n_valid*100:.2f}%)")
+    # 仅当用户启用了 SR（即传入了 --use_sr 并且主函数尝试加载）时 sr_net 会非 None，才显示 SR 相关统计
+    if sr_net is not None:
+        denom = yunet_sr_attempts
+        pct = (yunet_success_with_sr / denom * 100) if denom > 0 else 0.0
+        print(f"YUNET successes that used SR: {yunet_success_with_sr}/{denom} ({pct:.2f}%)")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -167,11 +226,36 @@ def main():
     parser.add_argument("--mode", default="640,640", help="YUNET input resize mode: 'ORIGIN'|'AUTO'|'W,H'")
     parser.add_argument("--score_thresh", type=float, default=0.02, help="Score threshold for YUNET filter")
     parser.add_argument("--qr_class_id", type=int, default=3, help="Class id for QR code in YUNET output")
+    # 新增 SR 相关参数
+    parser.add_argument("--use_sr", action="store_true", help="Enable SR fallback using qbar_sr.yaml / sr.py")
+    parser.add_argument("--sr_root", default=".", help="Root dir for SR yaml / onnx paths")
+    parser.add_argument("--sr_yaml", default="qbar_sr.yaml", help="SR yaml filename (relative to sr_root)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.image_dir):
         print(f"Image folder not found: {args.image_dir}")
         return
+
+    # 仅在 --use_sr 时动态导入并加载 SR（否则不导入、不打印）
+    sr_net = None
+    if args.use_sr:
+        try:
+            import sr as sr_module  # 动态导入
+            global load_sr_engine, run_sr_on_gray
+            load_sr_engine = getattr(sr_module, "load_sr_engine", None)
+            run_sr_on_gray = getattr(sr_module, "run_sr_on_gray", None)
+        except Exception:
+            print("SR module not available (could not import sr.py). Continuing without SR.")
+            load_sr_engine = None
+            run_sr_on_gray = None
+
+        if load_sr_engine is not None:
+            try:
+                sr_net = load_sr_engine(args.sr_root, args.sr_yaml)
+                print("SR engine loaded and enabled for fallback.")
+            except Exception as e:
+                print(f"Failed to load SR engine: {e}. Continuing without SR.")
+                sr_net = None
 
     benchmark(
         image_dir=args.image_dir,
@@ -180,9 +264,9 @@ def main():
         warmup=args.warmup,
         mode=args.mode,
         score_thresh=args.score_thresh,
-        qr_class_id=args.qr_class_id
+        qr_class_id=args.qr_class_id,
+        sr_net=sr_net
     )
-
 
 if __name__ == "__main__":
     main()
