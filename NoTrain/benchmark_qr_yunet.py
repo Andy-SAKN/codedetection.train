@@ -33,10 +33,12 @@ def decode_qr_with_yunet(img,
                          save_dir=None,
                          basename=None,
                          allow_save_once=False,
-                         sr_net=None):
+                         sr_net=None,
+                         expand_ratio=1.2):  # 新增参数 expand_ratio
     """
     先用 YUNET 检测，再在 ROI 上解码。
     返回 (success: bool, used_sr: bool, sr_attempted: bool)
+    - expand_ratio: 在原始 bbox 基础上的扩大比例，例如 1.2 表示 120%
     - sr_attempted: 表示是否在本次处理中曾尝试调用 SR（即解码失败后实际调用过 SR 推理）
     """
     bboxes, _ = yunet.detect(img, score_thresh=score_thresh, mode=mode)
@@ -50,8 +52,25 @@ def decode_qr_with_yunet(img,
         x1, y1, x2, y2, score, cls_id = bbox
         if int(cls_id) != qr_class_id:
             continue
-        xi1, yi1, xi2, yi2 = int(x1), int(y1), int(x2), int(y2)
-        roi = img[max(0, yi1):max(0, yi2), max(0, xi1):max(0, xi2)]
+
+        # 按原图坐标进行扩大（参考 yunet_decode.py 中的做法）
+        x1i, y1i, x2i, y2i = int(x1), int(y1), int(x2), int(y2)
+        w = x2i - x1i
+        h = y2i - y1i
+        if w <= 0 or h <= 0:
+            continue
+        cx = x1i + w // 2
+        cy = y1i + h // 2
+        new_w = int(w * expand_ratio)
+        new_h = int(h * expand_ratio)
+        new_x1 = max(0, cx - new_w // 2)
+        new_y1 = max(0, cy - new_h // 2)
+        new_x2 = min(img.shape[1], cx + new_w // 2)
+        new_y2 = min(img.shape[0], cy + new_h // 2)
+
+        xi1, yi1, xi2, yi2 = new_x1, new_y1, new_x2, new_y2
+
+        roi = img[yi1:yi2, xi1:xi2]
         if roi.size == 0:
             continue
 
@@ -63,6 +82,8 @@ def decode_qr_with_yunet(img,
             )
             try:
                 cv2.imwrite(save_path, roi)
+                # 仅在保存/打印路径输出扩大的比例和最终坐标，避免影响计时
+                print(f"[YUNET] bbox expanded by {expand_ratio:.2f}x -> ({xi1},{yi1},{xi2},{yi2}), saved: {save_path}")
             except Exception:
                 pass  # 保存失败不影响流程
             saved = True
@@ -91,12 +112,14 @@ def decode_qr_with_yunet(img,
 
 def benchmark(image_dir,
               model_path,
-              repeats=100,
+              repeats=3,
               warmup=5,
               mode='640,640',
               score_thresh=0.02,
               qr_class_id=3,
-              sr_net=None):
+              sr_net=None,
+              save_after=False,
+              expand_ratio=1.2):  # 新增参数 expand_ratio
     # 固定 OpenCV 线程数降低随机波动（需要可去掉）
     try:
         cv2.setNumThreads(1)
@@ -115,12 +138,14 @@ def benchmark(image_dir,
         print("No images found in folder:", image_dir)
         return
 
-    # 新增：after_images 与 images 并列，放在 image_dir 的父目录下
-    after_dir = os.path.join(os.path.dirname(os.path.abspath(image_dir)), "after_images")
-    try:
-        os.makedirs(after_dir, exist_ok=True)
-    except Exception:
-        pass
+    # 仅当用户请求保存时才创建 after_images（与 images 并列）
+    after_dir = None
+    if save_after:
+        after_dir = os.path.join(os.path.dirname(os.path.abspath(image_dir)), "after_images")
+        try:
+            os.makedirs(after_dir, exist_ok=True)
+        except Exception:
+            pass
 
     print(f"Found {len(img_list)} images.")
     warm_img = cv2.imread(img_list[0])
@@ -131,8 +156,7 @@ def benchmark(image_dir,
     # --- 预热：两条管线各跑几次，剔除首次冷启动的影响 ---
     for _ in range(warmup):
         decode_qr_fullimg(warm_img, qr_detector)
-        # 在预热时把 sr_net 也传入，以保证热身覆盖 SR 路径（若启用）
-        decode_qr_with_yunet(warm_img, yunet, qr_detector, qr_class_id, mode, score_thresh, sr_net=sr_net)
+        decode_qr_with_yunet(warm_img, yunet, qr_detector, qr_class_id, mode, score_thresh, sr_net=sr_net, expand_ratio=expand_ratio)
 
     # --- 正式计时 ---
     total_full, total_yunet = 0.0, 0.0
@@ -162,17 +186,23 @@ def benchmark(image_dir,
         # B: YUNET 粗检测 → ROI 解码（计时）
         t0 = perf_counter()
         for _ in range(repeats):
-            # 在计时中也传入 sr_net：若需要则包含 SR 时间（但不进行保存/打印）
-            decode_qr_with_yunet(img, yunet, qr_detector, qr_class_id, mode, score_thresh, sr_net=sr_net)
+            # 在计时中也传入 sr_net 与 expand_ratio（但不进行保存/打印）
+            decode_qr_with_yunet(img, yunet, qr_detector, qr_class_id, mode, score_thresh, sr_net=sr_net, expand_ratio=expand_ratio)
         t1 = perf_counter()
         avg_yunet = (t1 - t0) / repeats
 
-        # ✅ 在计时之外保存一次 ROI（若有），并统计成功率
+        # ✅ 在计时之外保存一次 ROI（若用户请求且有 ROI），并统计成功率
         full_ok = decode_qr_fullimg(img, qr_detector)
-        yunet_ok, yunet_used_sr, sr_attempted = decode_qr_with_yunet(
-            img, yunet, qr_detector, qr_class_id, mode, score_thresh,
-            save_dir=after_dir, basename=basename, allow_save_once=True, sr_net=sr_net
-        )
+        if after_dir is not None:
+            yunet_ok, yunet_used_sr, sr_attempted = decode_qr_with_yunet(
+                img, yunet, qr_detector, qr_class_id, mode, score_thresh,
+                save_dir=after_dir, basename=basename, allow_save_once=True, sr_net=sr_net, expand_ratio=expand_ratio
+            )
+        else:
+            yunet_ok, yunet_used_sr, sr_attempted = decode_qr_with_yunet(
+                img, yunet, qr_detector, qr_class_id, mode, score_thresh,
+                save_dir=None, basename=None, allow_save_once=False, sr_net=sr_net, expand_ratio=expand_ratio
+            )
 
         # 统计
         if full_ok:
@@ -221,7 +251,7 @@ def main():
     )
     parser.add_argument("image_dir", help="Folder containing QR code images")
     parser.add_argument("--model", default="./yunet_n_640_640.onnx", help="Path to YUNET ONNX model file")
-    parser.add_argument("--repeats", type=int, default=100, help="Repeat count per image for timing")
+    parser.add_argument("--repeats", type=int, default=3, help="Repeat count per image for timing")
     parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations before timing")
     parser.add_argument("--mode", default="640,640", help="YUNET input resize mode: 'ORIGIN'|'AUTO'|'W,H'")
     parser.add_argument("--score_thresh", type=float, default=0.02, help="Score threshold for YUNET filter")
@@ -230,6 +260,9 @@ def main():
     parser.add_argument("--use_sr", action="store_true", help="Enable SR fallback using qbar_sr.yaml / sr.py")
     parser.add_argument("--sr_root", default=".", help="Root dir for SR yaml / onnx paths")
     parser.add_argument("--sr_yaml", default="qbar_sr.yaml", help="SR yaml filename (relative to sr_root)")
+    # 新增：是否保存 after_images
+    parser.add_argument("--save_after", action="store_true", help="Save one ROI per image to after_images directory (placed alongside images folder)")
+    parser.add_argument("--expand_ratio", type=float, default=1.2, help="BBox expand ratio (e.g. 1.2 for 120%)")  # 新增参数
     args = parser.parse_args()
 
     if not os.path.isdir(args.image_dir):
@@ -265,7 +298,9 @@ def main():
         mode=args.mode,
         score_thresh=args.score_thresh,
         qr_class_id=args.qr_class_id,
-        sr_net=sr_net
+        sr_net=sr_net,
+        save_after=args.save_after,
+        expand_ratio=args.expand_ratio  # 传递 expand_ratio
     )
 
 if __name__ == "__main__":
